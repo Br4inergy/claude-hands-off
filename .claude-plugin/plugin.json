@@ -1,0 +1,10 @@
+{
+  "name": "hands-off",
+  "version": "0.5.0",
+  "description": "Hands Off: keep your AI agent from writing to repos, deploys and databases that aren't yours. Reading stays free; writes to what you protect (GitHub repos, Vercel, Railway, Neon, Supabase — CLI and MCP) need a one-time pass that only a human can give.",
+  "author": { "name": "Br4inergy", "url": "https://github.com/Br4inergy" },
+  "homepage": "https://github.com/Br4inergy/claude-hands-off",
+  "repository": "https://github.com/Br4inergy/claude-hands-off",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
