@@ -34,7 +34,7 @@ Then type `/handsoff` to open the panel and add what you want to protect. Nothin
 
 | Where | What counts as a write | Still allowed |
 | --- | --- | --- |
-| **GitHub repos**, recognised by their `origin` remote, not the folder name (a clone under another name is still protected; your own fork is not) | `git` commit, push, add, rm, reset, rebase, merge, tag, branch create/delete, stash, clean, cherry-pick…; `gh` pr/issue/release writes, `repo edit/delete`, `workflow run`, `api` POST/PUT/PATCH/DELETE; file edits (Edit, Write, `sed -i`, `rm`, `mv`, `>` redirects…) | log, diff, status, show, fetch, pull, clone, blame, `gh pr view/list`, any read |
+| **GitHub repos**, recognised by their `origin` remote, not the folder name (a clone under another name is still protected; your own fork is not; in a fork, `gh` commands that write go to the original by default: Hands Off checks every remote and, if needed, asks GitHub which repo it was forked from) | `git` commit, push, add, rm, reset, rebase, merge, tag, branch create/delete, stash, clean, cherry-pick…; `gh` pr/issue/release writes, `repo edit/delete`, `workflow run`, `api` POST/PUT/PATCH/DELETE; file edits (Edit, Write, `sed -i`, `rm`, `mv`, `>` redirects…) | log, diff, status, show, fetch, pull, clone, blame, `gh pr view/list`, any read |
 | **Vercel** projects, by name or `prj_…` id | deploy, `link`, `env add/rm/pull`, `promote`… when the folder is linked to the project (`.vercel/project.json`) or the command names it | `ls`, `inspect`, `logs`, `whoami`, `env ls`, `dev` |
 | **Railway** projects | `up`, `redeploy`, `down`, `variables --set`, `service`, `link`… when linked or named with `-p` | `status`, `logs`, `variables`, `list` |
 | **Neon** projects, by id | `neon` / `neonctl` (and `npx neonctl`): branch, role, database and project changes, `set-context`… by `--project-id` or the folder's `.neon` context | `branches list/get`, `connection-string`, `projects list/get` |
@@ -88,13 +88,17 @@ If the file breaks, Hands Off keeps protecting the last list it read whole and t
   when it blocks.
 - **Fails open on its own errors.** If its own check fails or takes too long, the call goes through and you get one
   warning; it never locks you out of your machine.
-- **Reads nothing over the network.** Links are read from the files the CLIs themselves write; the only commands it
-  runs are `git remote get-url` (to know a repo) and `gh repo view` (when you add one).
+- **Almost nothing over the network.** Links are read from the files the CLIs themselves write; the only commands it
+  runs are `git remote get-url` and `git config --get-regexp` (to know a repo and its remotes), `gh repo view` when
+  you add a repo, and one `gh repo view` per repo (cached for a week) when a `gh` command that writes runs in a repo
+  you didn't protect, to learn whether it is a fork of one you did. If you protect no repo, that lookup never happens.
 
 ## Known limits
 
-- Only the `origin` remote is checked (plus an explicit `git push` target). A fork whose `origin` is yours can still open
-  a PR to the original: that's not blocked.
+- For `git`, only the `origin` remote is checked (plus an explicit `git push` target).
+- In your own fork of a protected repo, opening a PR between your fork's branches is also stopped, because `gh` aims at the original:
+  use a pass or `gh pr create -R you/your-fork`. The fork check asks GitHub once per repo (cached a week) and lets the
+  command through if GitHub can't be reached.
 - Writes hidden inside a program (`python -c "open(...)"`, `node -e`) or an `xargs` are not seen.
 - A raw `psql` (or any client) with a connection string is not seen.
 - An MCP connection bound to a single project that doesn't send its project id can't be matched. GitHub's MCP tools are

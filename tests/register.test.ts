@@ -23,6 +23,9 @@ const ORIGINS: Record<string, string> = {
   '/w/mine': 'https://github.com/acme/own-app.git',
   '/w/fork': 'https://github.com/someone/api.git',
   '/w/other': 'https://github.com/someone/legacy-app.git',
+  '/w/forkup': 'https://github.com/someone/fork-up.git',
+  '/w/forknp': 'https://github.com/someone/fork-np.git',
+  '/w/forkerr': 'https://github.com/someone/fork-err.git',
 }
 const DIRS = new Set(['/', '/w', '/tmp', '/home', HOME, ...Object.keys(ORIGINS)])
 const proc = (exitCode: number, stdout = '') => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
@@ -57,6 +60,12 @@ type World = {
   /** dir → content of `<dir>/supabase/.temp/project-ref` (linked Supabase project). */
   supabase?: Record<string, string>
   failCwd?: boolean
+  /** dir → every remote URL of that repo (what `git config --get-regexp ^remote\..*\.url` lists); repos not listed answer exit 1. */
+  remotes?: Record<string, string[]>
+  /** GitHub's answer to `gh repo view <slug> --json parent`: slug → parent owner/repo; a slug not listed is not a fork. */
+  parents?: Record<string, string>
+  /** `gh` fails (offline, not signed in). */
+  ghFails?: boolean
 }
 
 /** The fake disk and git + the clock. `seen` = the tools that reached the bottom (the ones Hands Off let through). */
@@ -64,6 +73,7 @@ function world(on: On, w: World) {
   const clock = mock.clock(on, { now: T0 })
   const seen: string[] = []
   const toasts: string[] = []
+  const ghCalls: string[] = []
   const commands: { name: string; description: string; argumentHint?: string }[] = []
   const writes: Record<string, string> = {}
   let config = w.config === undefined ? null : w.config
@@ -125,8 +135,17 @@ function world(on: On, w: World) {
     return { value: undefined }
   })
   on('process.run', (_$, e) => {
-    const [bin, flag, dir = '', , , name = ''] = e.argv
+    if (e.argv[0] === 'gh') {
+      ghCalls.push(e.argv.slice(1).join(' '))
+      if (w.ghFails || e.argv[1] !== 'repo' || e.argv[2] !== 'view') return proc(1)
+      return proc(0, `${w.parents?.[e.argv[3] ?? ''] ?? ''}\n`)
+    }
+    const [bin, flag, dir = '', verb, , name = ''] = e.argv
     const root = rootOf(dir)
+    if (bin === 'git' && flag === '-C' && verb === 'config' && e.argv[4] === '--get-regexp') {
+      const urls = (root ? w.remotes?.[root] : undefined) ?? null
+      return urls ? proc(0, urls.map((u, i) => `remote.r${i}.url ${u}`).join('\n') + '\n') : proc(1)
+    }
     if (bin !== 'git' || flag !== '-C' || !root || name !== 'origin') return proc(1)
     return proc(0, `${ORIGINS[root]}\n`)
   })
@@ -138,7 +157,7 @@ function world(on: On, w: World) {
     seen.push(e.tool === 'Bash' ? `Bash:${e.command}` : e.tool)
     return e.tool === 'Bash' ? OK : { result: {} }
   })
-  return { setConfig: (text: string | null) => { config = text }, clock, seen, toasts, writes, commands }
+  return { setConfig: (text: string | null) => { config = text }, clock, seen, toasts, writes, commands, ghCalls }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
@@ -830,4 +849,74 @@ test('a list that breaks later keeps protecting what it protected (the last list
   w.setConfig('{ broken')
   expect((await $.tool.call(bash('git commit -m b'))).deny).toBeDefined()
   expect(w.toasts.join('\n')).toContain('still protecting the last list')
+})
+
+// ── forks: gh writes go to the parent of a fork ──────────────────────────────
+
+test('fork with an upstream remote: gh writes are denied without asking GitHub; reads and git pass', async ($, on) => {
+  const w = world(on, {
+    cwd: '/w/forkup',
+    config: listText(),
+    remotes: { '/w/forkup': ['https://github.com/someone/fork-up.git', 'git@github.com:acme/api.git'] },
+  })
+  await start($)
+  const denied = await $.tool.call(bash('gh pr create --fill'))
+  expect(denied.deny).toContain('acme/api is protected')
+  expect(denied.deny).toContain('[blocked: gh pr create]')
+  expect((await $.tool.call(bash('gh issue create --title x'))).deny).toContain('acme/api')
+  for (const command of ['gh pr view 1', 'git push', 'gh pr create -R someone/fork-up --fill']) {
+    expect((await $.tool.call(bash(command))).deny).toBeUndefined()
+  }
+  expect(w.ghCalls).toEqual([])
+})
+
+test('fork without an upstream remote: the parent GitHub names is protected; asked once, then cached', async ($, on) => {
+  const w = world(on, {
+    cwd: '/w/forknp',
+    config: listText(),
+    remotes: { '/w/forknp': ['https://github.com/someone/fork-np.git'] },
+    parents: { 'someone/fork-np': 'acme/api' },
+  })
+  await start($)
+  expect((await $.tool.call(bash('gh pr create --fill'))).deny).toContain('acme/api is protected')
+  expect(w.ghCalls.length).toBe(1)
+  expect(w.ghCalls[0]).toContain('repo view someone/fork-np --json parent')
+  // the second command does not ask GitHub again
+  expect((await $.tool.call(bash('gh issue comment 4 -b hola'))).deny).toContain('acme/api is protected')
+  expect(w.ghCalls.length).toBe(1)
+  // reads and git never ask
+  for (const command of ['gh pr view 1', 'git push', 'gh api repos/{owner}/{repo}/issues']) {
+    expect((await $.tool.call(bash(command))).deny).toBeUndefined()
+  }
+  expect(w.ghCalls.length).toBe(1)
+})
+
+test('fork check with gh failing: the command goes through, with exactly one warning; nothing is cached', async ($, on) => {
+  const w = world(on, {
+    cwd: '/w/forkerr',
+    config: listText(),
+    remotes: { '/w/forkerr': ['https://github.com/someone/fork-err.git'] },
+    parents: { 'someone/fork-err': 'acme/api' },
+    ghFails: true,
+  })
+  await start($)
+  expect((await $.tool.call(bash('gh pr create --fill'))).deny).toBeUndefined()
+  expect((await $.tool.call(bash('gh issue create --title x'))).deny).toBeUndefined()
+  expect(w.seen).toEqual(['Bash:gh pr create --fill', 'Bash:gh issue create --title x'])
+  expect(w.ghCalls.length).toBe(2)
+  expect(w.toasts.length).toBe(1)
+  expect(w.toasts[0]).toContain("couldn't check on GitHub whether this repo is a fork of a protected one")
+})
+
+test('with an empty list GitHub is never asked', async ($, on) => {
+  const w = world(on, {
+    cwd: '/w/forkerr',
+    config: listText({ repos: [] }),
+    remotes: { '/w/forkerr': ['https://github.com/someone/fork-err.git'] },
+    ghFails: true,
+  })
+  await start($)
+  expect((await $.tool.call(bash('gh pr create --fill'))).deny).toBeUndefined()
+  expect(w.ghCalls).toEqual([])
+  expect(w.toasts).toEqual([])
 })

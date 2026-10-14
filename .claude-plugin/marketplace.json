@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Hands Off: keep your AI agent from writing to repos, deploys and databases that aren't yours.",
-    "version": "0.5.0"
+    "version": "0.6.0"
   },
   "plugins": [
     {
       "name": "hands-off",
       "description": "Hands Off: keep your AI agent from writing to repos, deploys and databases that aren't yours. Reading stays free; writes to what you protect (GitHub repos, Vercel, Railway, Neon, Supabase \u2014 CLI and MCP) need a one-time pass that only a human can give.",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "author": {
         "name": "Br4inergy"
       },

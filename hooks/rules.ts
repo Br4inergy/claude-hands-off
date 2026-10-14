@@ -478,6 +478,9 @@ export function resolvePath(p: string, dir: string | null, home: string): string
 
 export type Hit = { key: string; label: string; detail: string }
 
+/** Notices the rules can raise through `Deps.warn`. */
+export type Warning = 'forkUnchecked'
+
 export type Deps = {
   cwd: string
   home: string
@@ -487,6 +490,15 @@ export type Deps = {
   originOf: (path: string) => Promise<string>
   /** URL of the remote `name` of the repo of `dir`; ''. */
   remoteUrl: (dir: string, name: string) => Promise<string>
+  /** URLs of ALL the remotes of the repo that contains `dir` (local, no network); [] if there is no repo or on any error. */
+  remotesOf: (dir: string) => Promise<string[]>
+  /**
+   * The repo the GitHub repo `slug` (owner/repo) was forked from, asked to GitHub (network, cached by the caller):
+   * its `owner/repo`; `null` = GitHub says it is not a fork; `undefined` = it could not be checked (offline, no gh, no login).
+   */
+  parentOf: (slug: string) => Promise<string | null | undefined>
+  /** Raises a notice the caller shows to the person (once per session); the rules stay pure. */
+  warn: (key: Warning) => void | Promise<void>
   /** Name of the Railway project linked to `dir`; ''. */
   railwayLinked: (dir: string) => Promise<string>
   /** Vercel project linked to `dir` (.vercel/project.json); empty strings if none. */
@@ -680,6 +692,7 @@ export class Scan {
   hits: Hit[] = []
   private lookups = 0
   private cache = new Map<string, string | null>()
+  private forks = new Map<string, string | null>()
 
   constructor(private deps: Deps) {}
 
@@ -701,6 +714,38 @@ export class Scan {
     const slug = url ? matchSlug(url, this.config) : null
     this.cache.set(path, slug)
     return slug
+  }
+
+  /**
+   * The protected repo a `gh` WRITE reaches from `dir` when the command names no repo. `gh` aims at the PARENT of a fork,
+   * not at its `origin`, so besides the origin it looks at (1) every remote of the repo (local) and (2) only if those
+   * find nothing, at the repo `origin` was forked from, asked to GitHub (skipped when nothing is protected).
+   */
+  private async ghTarget(dir: string | null): Promise<string | null> {
+    const origin = await this.slugAt(dir)
+    if (origin || dir === null) return origin
+    if (this.forks.has(dir)) return this.forks.get(dir) ?? null
+    const slug = await this.forkTarget(dir)
+    this.forks.set(dir, slug)
+    return slug
+  }
+
+  private async forkTarget(dir: string): Promise<string | null> {
+    if (++this.lookups > MAX_ORIGIN_LOOKUPS) return null
+    for (const url of await this.deps.remotesOf(dir).catch(() => [] as string[])) {
+      const slug = matchSlug(url, this.config)
+      if (slug) return slug
+    }
+    if (this.config.repos.length === 0) return null
+    const origin = await this.deps.originOf(dir).catch(() => '')
+    const own = /github\.com[/:]/i.test(origin) ? slugFromUrl(origin) : null
+    if (!own) return null
+    const parent = await this.deps.parentOf(own).catch(() => undefined)
+    if (parent === undefined) {
+      await Promise.resolve(this.deps.warn('forkUnchecked')).catch(() => undefined)
+      return null
+    }
+    return parent ? matchSlug(parent, this.config) : null
   }
 
   private async hitPath(path: string | null, detail: string) {
@@ -801,7 +846,8 @@ export class Scan {
     const [group, sub] = p.pos
     if (group === undefined) return
     const repoFlag = p.value('-R', '--repo') ?? env.GH_REPO
-    const current = async () => (repoFlag ? matchSlug(repoFlag, this.config) : this.slugAt(dir))
+    // `gh api` ignores -R: a repo flag or GH_REPO there keeps the origin-only check it always had.
+    const current = async (named = false) => (repoFlag ? matchSlug(repoFlag, this.config) : named ? this.slugAt(dir) : this.ghTarget(dir))
 
     if (group === 'api') {
       const endpoint = p.pos[1] ?? ''
@@ -811,25 +857,30 @@ export class Scan {
       if (endpoint === 'graphql') {
         if (!args.some(a => /\bmutation\b/.test(a))) return
         const mentioned = this.config.repos.find(r => args.some(a => a.toLowerCase().includes(r.toLowerCase())))
-        const slug = mentioned ?? (await this.slugAt(dir))
+        // gh fills the repo of a mutation from -R / GH_REPO when given, else from the folder (and its fork parent).
+        const slug = mentioned ?? (repoFlag ? matchSlug(repoFlag, this.config) : await this.ghTarget(dir))
         if (slug) this.hit(slug, 'gh api graphql (mutation)')
         return
       }
       const m = endpoint.match(/^\/?repos\/([^/]+)\/([^/?#]+)/i)
       if (!m) return
-      const slug = m[1]!.includes('{') ? await this.slugAt(dir) : matchSlug(`${m[1]}/${m[2]}`, this.config)
+      // `{owner}/{repo}` is filled by gh from -R / GH_REPO when given, else from the folder (and its fork parent).
+      const slug = m[1]!.includes('{') ? (repoFlag ? matchSlug(repoFlag, this.config) : await this.ghTarget(dir)) : matchSlug(`${m[1]}/${m[2]}`, this.config)
       if (slug) this.hit(slug, `gh api -X ${method}`)
       return
     }
 
     // A PR/issue by URL, or `gh repo edit owner/repo`, names the repo without -R.
-    const named = p.pos.slice(2).map(x => {
+    const rest = p.pos.slice(2)
+    const named = rest.map(x => {
       const url = x.match(/github\.com[/:]([^/\s]+)\/([^/\s#?]+)/i)
       return url ? matchSlug(`${url[1]}/${url[2]}`, this.config) : group === 'repo' ? matchSlug(x, this.config) : null
     })
     const writes = GH_WRITE[group]
     if (!writes || sub === undefined || !writes.includes(sub)) return
-    const slug = named.find(Boolean) ?? (await current())
+    // A repo named by URL or position decides as before (the fork layers apply only when nothing names the repo).
+    const mentionsRepo = rest.some(x => /github\.com[/:]/i.test(x) || group === 'repo')
+    const slug = named.find(Boolean) ?? (await current(mentionsRepo))
     if (slug) this.hit(slug, `gh ${group} ${sub}`)
   }
 

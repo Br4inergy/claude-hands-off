@@ -45,6 +45,7 @@ const EN = {
   legacyUnreadable: 'Hands Off: ~/.claude/intocables.json could not be read, so it was not imported; starting with an empty list',
   ruleFailed: (why: string) => `Hands Off: the rule failed and the call was let through (${why})`,
   tookTooLong: 'the analysis took too long',
+  forkUnchecked: "Hands Off couldn't check on GitHub whether this repo is a fork of a protected one (offline or gh not signed in); let it through.",
   passUsed: (labels: string) => `Hands Off: pass used on ${labels}`,
   blockedToast: (detail: string, labels: string) => `Hands Off blocked ${detail} on ${labels}. To allow it once: /handsoff pass`,
 
@@ -156,6 +157,7 @@ const ES: Words = {
   legacyUnreadable: 'Intocables: ~/.claude/intocables.json no se pudo leer, así que no se importó; empiezo con la lista vacía',
   ruleFailed: why => `Intocables: la regla falló y dejé pasar la llamada (${why})`,
   tookTooLong: 'el análisis tardó demasiado',
+  forkUnchecked: 'Intocables no pudo revisar en GitHub si este repo es fork de uno protegido (sin red o gh sin sesión); lo dejé pasar.',
   passUsed: labels => `Intocables: pase usado en ${labels}`,
   blockedToast: (detail, labels) => `Intocables bloqueó ${detail} en ${labels}. Para permitirlo una vez: /intocables pase`,
 

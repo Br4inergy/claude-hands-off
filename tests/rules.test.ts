@@ -50,6 +50,13 @@ const ORIGINS: Record<string, string> = {
   '/w/mine': 'https://github.com/acme/own-app.git',
   '/w/fork': 'https://github.com/someone/api.git',
   '/w/nogit': '',
+  '/w/forkup': 'https://github.com/someone/fork.git',
+  '/w/forknp': 'git@github.com:someone/fork.git',
+}
+/** Every remote URL of a repo (what `remotesOf` returns); folders not listed here have none. */
+const ALL_REMOTES: Record<string, string[]> = {
+  '/w/forkup': ['https://github.com/someone/fork.git', 'git@github.com:acme/api.git'],
+  '/w/forknp': ['git@github.com:someone/fork.git'],
 }
 const REMOTES: Record<string, Record<string, string>> = {
   '/w/fork': { upstream: 'https://github.com/acme/api.git', origin: 'https://github.com/someone/api.git' },
@@ -81,6 +88,9 @@ function deps(cwd: string, over: Partial<Deps> = {}): Deps {
     words: EN,
     originOf: async path => ORIGINS[rootOf(path, ORIGINS) ?? ''] ?? '',
     remoteUrl: async (dir, name) => REMOTES[rootOf(dir, REMOTES) ?? '']?.[name] ?? '',
+    remotesOf: async dir => ALL_REMOTES[rootOf(dir, ALL_REMOTES) ?? ''] ?? [],
+    parentOf: async () => null,
+    warn: () => undefined,
     railwayLinked: async dir => RAILWAY[rootOf(dir, RAILWAY) ?? ''] ?? '',
     vercelLinked: async dir => VERCEL[rootOf(dir, VERCEL) ?? ''] ?? { name: '', id: '' },
     neonContext: async (dir, file) => (file ? NEON_FILES[file] : NEON_DIRS[rootOf(dir, NEON_DIRS) ?? '']) ?? '',
@@ -1013,4 +1023,84 @@ test('checkMcp: explain with analyze runs the query, so it counts as a write', (
   const config = { ...CFG, neonProjects: ['proud-cloud-12345678'] }
   expect(checkMcp('mcp__Neon__explain_sql_statement', { projectId: 'proud-cloud-12345678', sql: 'delete from t', analyze: true }, config).length).toBe(1)
   expect(checkMcp('mcp__Neon__explain_sql_statement', { projectId: 'proud-cloud-12345678', sql: 'select 1' }, config)).toEqual([])
+})
+
+// ── forks: gh writes go to the PARENT of a fork ────────────────────────────
+
+test('in a fork with an upstream remote, gh writes reach the protected original and are blocked', async () => {
+  expect(await labels('gh pr create --fill', '/w/forkup')).toEqual(['acme/api'])
+  expect(await labels('gh issue create --title x', '/w/forkup')).toEqual(['acme/api'])
+  expect(await labels('gh pr merge 12 --squash', '/w/forkup')).toEqual(['acme/api'])
+  const hit = await checkBash('gh pr comment 3 --body hi', deps('/w/forkup'))
+  expect(hit.map(h => h.detail)).toEqual(['gh pr comment'])
+  expect(await labels('gh api -X POST repos/{owner}/{repo}/issues -f title=x', '/w/forkup')).toEqual(['acme/api'])
+  expect(await labels('gh api repos/{owner}/{repo}/issues -f title=x', '/w/forkup')).toEqual(['acme/api'])
+  expect(await labels('gh api graphql -f query=\'mutation { addStar(input:{starrableId:"x"}) { clientMutationId } }\'', '/w/forkup')).toEqual(['acme/api'])
+})
+
+test('in that fork, reads, git and a command that names its own repo are not blocked', async () => {
+  expect(await labels('gh pr view 1', '/w/forkup')).toEqual([])
+  expect(await labels('gh pr list', '/w/forkup')).toEqual([])
+  expect(await labels('gh api repos/{owner}/{repo}/issues', '/w/forkup')).toEqual([])
+  expect(await labels('git push', '/w/forkup')).toEqual([])
+  expect(await labels('git commit -m x', '/w/forkup')).toEqual([])
+  // the named repo decides: the layers do not apply
+  expect(await labels('gh pr create -R someone/fork --fill', '/w/forkup')).toEqual([])
+  expect(await labels('GH_REPO=someone/fork gh pr create --fill', '/w/forkup')).toEqual([])
+  expect(await labels('gh pr merge https://github.com/someone/fork/pull/3', '/w/forkup')).toEqual([])
+  expect(await labels('gh pr create -R acme/api --fill', '/w/forkup')).toEqual(['acme/api'])
+})
+
+test('a fork with no upstream remote: the parent that GitHub names decides', async () => {
+  const asked: string[] = []
+  const parentIs = (parent: string | null | undefined) => async (slug: string) => {
+    asked.push(slug)
+    return parent
+  }
+  expect(await labels('gh pr create --fill', '/w/forknp', { parentOf: parentIs('acme/api') })).toEqual(['acme/api'])
+  expect(await labels('gh api -X POST repos/{owner}/{repo}/issues -f title=x', '/w/forknp', { parentOf: parentIs('ACME/API') })).toEqual(['acme/api'])
+  expect(asked).toEqual(['someone/fork', 'someone/fork'])
+  expect(await labels('gh pr create --fill', '/w/forknp', { parentOf: parentIs('other/lib') })).toEqual([])
+  expect(await labels('gh pr create --fill', '/w/forknp', { parentOf: parentIs(null) })).toEqual([])
+})
+
+test('when GitHub cannot be asked the command goes through and one warning is raised', async () => {
+  const warned: string[] = []
+  const over = { parentOf: async () => undefined, warn: (key: string) => void warned.push(key) }
+  expect(await labels('gh pr create --fill', '/w/forknp', over)).toEqual([])
+  expect(warned).toEqual(['forkUnchecked'])
+  // the same command (several gh in one line) asks only once
+  warned.length = 0
+  expect(await labels('gh pr create --fill && gh issue create --title x', '/w/forknp', over)).toEqual([])
+  expect(warned).toEqual(['forkUnchecked'])
+  // a protected remote found locally never needs GitHub
+  warned.length = 0
+  expect(await labels('gh pr create --fill', '/w/forkup', over)).toEqual(['acme/api'])
+  expect(warned).toEqual([])
+})
+
+test('GitHub is not asked for reads, git, named repos, non-GitHub origins, or when nothing is protected', async () => {
+  let asked = 0
+  const over = { parentOf: async () => (asked++, 'acme/api' as string | null) }
+  for (const cmd of ['gh pr view 1', 'git push', 'gh pr create -R someone/fork', 'gh api repos/{owner}/{repo}/issues', 'gh pr merge https://github.com/someone/fork/pull/3']) {
+    expect([cmd, await labels(cmd, '/w/forknp', over)]).toEqual([cmd, []])
+  }
+  expect(asked).toBe(0)
+  // an own repo that is not on GitHub: nothing to ask
+  expect(await labels('gh pr create --fill', '/w/nogit', over)).toEqual([])
+  expect(asked).toBe(0)
+  // nothing protected: no network
+  const none: Config = { ...CFG, repos: [] }
+  expect(await labels('gh pr create --fill', '/w/forknp', { ...over, config: none })).toEqual([])
+  expect(asked).toBe(0)
+  // a protected origin is already a hit and does not need the parent either
+  expect(await labels('gh pr create --fill', '/w/fleet', over)).toEqual(['acme/api'])
+  expect(asked).toBe(0)
+})
+
+test('gh api with {owner}/{repo}: gh fills it from -R / GH_REPO, so that repo decides', async () => {
+  const protectedRepo = CFG.repos[0]!
+  expect(await labels(`gh api -R ${protectedRepo} repos/{owner}/{repo}/issues -f title=x`, '/w/mine')).toEqual([protectedRepo])
+  expect(await labels(`GH_REPO=${protectedRepo} gh api repos/{owner}/{repo}/issues -f title=x`, '/w/mine')).toEqual([protectedRepo])
+  expect(await labels('gh api -R someone/other repos/{owner}/{repo}/issues -f title=x', '/w/mine')).toEqual([])
 })

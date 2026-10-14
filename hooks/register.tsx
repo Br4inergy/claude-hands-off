@@ -60,6 +60,10 @@ const HISTORY_MAX = 30
 /** Time cap for the analysis: if git or the disk hang, the call goes through (fail-open). */
 const BUDGET_MS = 9000
 const CACHE_TTL_MS = 15_000
+/** How long GitHub's answer about a fork's parent is kept (the parent of a repo practically never changes). */
+const FORK_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/** Time cap for the one `gh repo view` per repo. */
+const GH_TIMEOUT_MS = 6000
 
 // ── language ────────────────────────────────────────────────────────────────
 
@@ -200,6 +204,64 @@ async function originOfPath($: EngineInterface, path: string) {
   return url
 }
 
+/** All the remote URLs of the repo that contains `dir` (local, no network); [] on any error. */
+async function remotesOfPath($: EngineInterface, dir: string) {
+  const out = await git($, await containingDir($, dir), ['config', '--get-regexp', '^remote\\..*\\.url'])
+  const urls = out
+    .split('\n')
+    .map(line => line.replace(/^\S+\s+/, '').trim())
+    .filter(Boolean)
+  return [...new Set(urls)]
+}
+
+// Parent of a fork according to GitHub: per owner/repo, in memory and in the store (a week). `undefined` is never kept.
+type ForkEntry = { parent: string | null; at: number }
+const forkCache = new Map<string, ForkEntry>()
+let forkWarned = false
+
+const isForkEntry = (x: unknown): x is ForkEntry => {
+  const e = x as ForkEntry | null
+  return !!e && typeof e === 'object' && typeof e.at === 'number' && (e.parent === null || typeof e.parent === 'string')
+}
+
+/** `owner/repo` this repo was forked from; null = not a fork; undefined = could not be checked. */
+async function parentOfSlug($: EngineInterface, slug: string): Promise<string | null | undefined> {
+  if (!/^[A-Za-z0-9_][\w.-]*\/[\w.-]+$/.test(slug)) return null
+  const key = slug.toLowerCase()
+  const now = await $.clock.now()
+  const fresh = (e: ForkEntry | undefined): e is ForkEntry => !!e && now >= e.at && now - e.at < FORK_TTL_MS
+  const memory = forkCache.get(key)
+  if (fresh(memory)) return memory.parent
+  const stored = (await $.store.get('forkParents').catch(() => undefined)) as Record<string, unknown> | undefined
+  const saved = stored && typeof stored === 'object' ? stored[key] : undefined
+  if (isForkEntry(saved) && fresh(saved)) {
+    forkCache.set(key, saved)
+    return saved.parent
+  }
+  let parent: string | null
+  try {
+    const run = await $.process.run(
+      ['gh', 'repo', 'view', slug, '--json', 'parent', '-q', 'if .parent then .parent.owner.login + "/" + .parent.name else "" end'],
+      { timeoutMs: GH_TIMEOUT_MS },
+    )
+    if (run.exitCode !== 0) return undefined
+    const out = run.stdout.trim()
+    if (out !== '' && !/^[\w.-]+\/[\w.-]+$/.test(out)) return undefined
+    parent = out === '' ? null : out
+  } catch {
+    return undefined
+  }
+  const entry = { parent, at: now }
+  forkCache.set(key, entry)
+  await $.store
+    .set('forkParents', {
+      ...Object.fromEntries(Object.entries(stored && typeof stored === 'object' ? stored : {}).filter(([, v]) => isForkEntry(v) && fresh(v))),
+      [key]: entry,
+    })
+    .catch(() => undefined)
+  return parent
+}
+
 /** Railway project linked to the directory, from ~/.railway/config.json (no network): the nearest link going up. */
 async function railwayLinked($: EngineInterface, home: string, dir: string) {
   try {
@@ -285,6 +347,13 @@ async function depsFor($: EngineInterface): Promise<Deps> {
     words: await wordsOf($),
     originOf: path => originOfPath($, path),
     remoteUrl: async (dir, name) => git($, await containingDir($, dir), ['remote', 'get-url', name]),
+    remotesOf: dir => remotesOfPath($, dir),
+    parentOf: slug => parentOfSlug($, slug),
+    warn: async key => {
+      if (key !== 'forkUnchecked' || forkWarned) return
+      forkWarned = true
+      $.ui.toast((await wordsOf($)).forkUnchecked)
+    },
     railwayLinked: dir => railwayLinked($, home, dir),
     vercelLinked: dir => vercelLinked($, dir),
     neonContext: (dir, file) => neonContext($, dir, file),
@@ -505,6 +574,7 @@ async function runCommand($: EngineInterface, e: { args?: string; origin: { kind
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     lastViewJson = ''
+    forkWarned = false
     const l = await detectLang($)
     const w = words(l)
     await $.command.register({ name: 'handsoff', description: w.commandDescription, argumentHint: w.argumentHint })
