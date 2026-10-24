@@ -526,7 +526,9 @@ const OUT_OPS = new Set(['>', '>>', '>|', '&>', '&>>', '>&'])
 const GH_VALUE = ['-R', '--repo', '-X', '--method', '-H', '--header', '-f', '-F', '--field', '--raw-field', '--input', '-q', '--jq', '-t', '--template', '--hostname', '--cache', '-b', '--body', '-B', '--base', '--head', '--title', '-a', '--assignee', '-l', '--label', '-m', '--milestone', '-p', '--project', '-r', '--reviewer', '--body-file', '-F', '--notes', '--notes-file', '--target']
 const GH_WRITE: Record<string, readonly string[]> = {
   pr: ['create', 'merge', 'edit', 'close', 'comment', 'review', 'ready', 'reopen', 'update-branch', 'lock', 'unlock'],
-  issue: ['create', 'edit', 'close', 'comment', 'reopen', 'delete', 'transfer', 'pin', 'unpin', 'lock', 'unlock', 'develop'],
+  // `issue create` / `issue comment` are not here on purpose: filing a ticket or commenting on one does not change the repo
+  // (José, 24-oct-2026: "Hands Off sí debería permitir crear tickets"). Editing, closing, deleting or moving issues still writes.
+  issue: ['edit', 'close', 'reopen', 'delete', 'transfer', 'pin', 'unpin', 'lock', 'unlock', 'develop'],
   release: ['create', 'edit', 'delete', 'upload', 'delete-asset'],
   repo: ['edit', 'delete', 'archive', 'unarchive', 'rename', 'sync', 'deploy-key'],
   workflow: ['disable', 'enable', 'run'],
@@ -536,6 +538,9 @@ const GH_WRITE: Record<string, readonly string[]> = {
   variable: ['set', 'delete'],
   cache: ['delete'],
 }
+
+/** `gh api` endpoints that only file a ticket or comment on one (POST): allowed even in a protected repo. */
+const ISSUE_TICKET_ENDPOINT = /^\/?repos\/[^/]+\/[^/?#]+\/issues(\/\d+\/comments)?\/?(\?.*)?$/i
 
 const VERCEL_VALUE = ['--cwd', '-t', '--token', '-S', '--scope', '-A', '--local-config', '-Q', '--global-config', '-e', '--env', '-b', '--build-env', '-m', '--meta', '--target', '--regions', '-n', '--name', '--org', '--project']
 const VERCEL_READ = new Set(['ls', 'list', 'inspect', 'logs', 'whoami', 'help', 'login', 'logout', 'teams', 'switch', 'bisect', 'curl', 'httpstat', 'telemetry', 'dev'])
@@ -864,6 +869,8 @@ export class Scan {
       }
       const m = endpoint.match(/^\/?repos\/([^/]+)\/([^/?#]+)/i)
       if (!m) return
+      // Filing a ticket (POST …/issues) or commenting on one (POST …/issues/N/comments) is allowed, like `gh issue create/comment`.
+      if (method === 'POST' && ISSUE_TICKET_ENDPOINT.test(endpoint)) return
       // `{owner}/{repo}` is filled by gh from -R / GH_REPO when given, else from the folder (and its fork parent).
       const slug = m[1]!.includes('{') ? (repoFlag ? matchSlug(repoFlag, this.config) : await this.ghTarget(dir)) : matchSlug(`${m[1]}/${m[2]}`, this.config)
       if (slug) this.hit(slug, `gh api -X ${method}`)

@@ -863,7 +863,7 @@ test('fork with an upstream remote: gh writes are denied without asking GitHub; 
   const denied = await $.tool.call(bash('gh pr create --fill'))
   expect(denied.deny).toContain('acme/api is protected')
   expect(denied.deny).toContain('[blocked: gh pr create]')
-  expect((await $.tool.call(bash('gh issue create --title x'))).deny).toContain('acme/api')
+  expect((await $.tool.call(bash('gh issue edit 4 --title y'))).deny).toContain('acme/api')
   for (const command of ['gh pr view 1', 'git push', 'gh pr create -R someone/fork-up --fill']) {
     expect((await $.tool.call(bash(command))).deny).toBeUndefined()
   }
@@ -882,7 +882,7 @@ test('fork without an upstream remote: the parent GitHub names is protected; ask
   expect(w.ghCalls.length).toBe(1)
   expect(w.ghCalls[0]).toContain('repo view someone/fork-np --json parent')
   // the second command does not ask GitHub again
-  expect((await $.tool.call(bash('gh issue comment 4 -b hola'))).deny).toContain('acme/api is protected')
+  expect((await $.tool.call(bash('gh issue close 4'))).deny).toContain('acme/api is protected')
   expect(w.ghCalls.length).toBe(1)
   // reads and git never ask
   for (const command of ['gh pr view 1', 'git push', 'gh api repos/{owner}/{repo}/issues']) {
@@ -901,8 +901,8 @@ test('fork check with gh failing: the command goes through, with exactly one war
   })
   await start($)
   expect((await $.tool.call(bash('gh pr create --fill'))).deny).toBeUndefined()
-  expect((await $.tool.call(bash('gh issue create --title x'))).deny).toBeUndefined()
-  expect(w.seen).toEqual(['Bash:gh pr create --fill', 'Bash:gh issue create --title x'])
+  expect((await $.tool.call(bash('gh issue edit 4 --title y'))).deny).toBeUndefined()
+  expect(w.seen).toEqual(['Bash:gh pr create --fill', 'Bash:gh issue edit 4 --title y'])
   expect(w.ghCalls.length).toBe(2)
   expect(w.toasts.length).toBe(1)
   expect(w.toasts[0]).toContain("couldn't check on GitHub whether this repo is a fork of a protected one")

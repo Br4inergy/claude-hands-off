@@ -289,10 +289,8 @@ test('gh: writes with -R, with the URL, or running inside the repo are blocked',
     'gh pr close 3',
     'gh pr comment 3 --body hola',
     'gh pr review 3 --approve',
-    'gh issue create --title x',
     'gh issue edit 4 --title y',
     'gh issue close 4',
-    'gh issue comment 4 -b hola',
     'gh release create v1 --notes x',
     'gh release delete v1',
     'gh repo edit --description x',
@@ -300,8 +298,6 @@ test('gh: writes with -R, with the URL, or running inside the repo are blocked',
     'gh repo rename nuevo',
     'gh workflow run ci.yml',
     'gh workflow disable ci.yml',
-    'gh api -X POST repos/acme/api/issues -f title=x',
-    'gh api repos/acme/api/issues -f title=x',
     'gh api --method DELETE /repos/acme/api/git/refs/heads/x',
     'gh api -X PATCH repos/{owner}/{repo}/pulls/3 -f state=closed',
   ]) expect([cmd, await blocked(cmd)]).toEqual([cmd, true])
@@ -310,13 +306,11 @@ test('gh: writes with -R, with the URL, or running inside the repo are blocked',
     'gh pr create --repo acme/api --title x',
     'gh pr merge 12 -R acme/web',
     'gh pr merge https://github.com/acme/server/pull/12',
-    'gh issue comment 1 -R acme/crm -b hola',
     'gh release create v1 -R acme/platform',
     'gh repo edit acme/api --visibility private',
     'gh repo delete acme/crm --yes',
     'gh workflow run ci.yml -R acme/api',
     'GH_REPO=acme/api gh pr create --fill',
-    'gh api -X POST repos/acme/server/issues -f title=x',
     'gh api -X PUT /repos/acme/api/topics',
     'gh api graphql -f query=\'mutation { addStar(input:{starrableId:"x"}) { clientMutationId } }\' -f note=acme/api',
   ]) expect([cmd, await blocked(cmd, '/w/mine')]).toEqual([cmd, true])
@@ -1029,12 +1023,12 @@ test('checkMcp: explain with analyze runs the query, so it counts as a write', (
 
 test('in a fork with an upstream remote, gh writes reach the protected original and are blocked', async () => {
   expect(await labels('gh pr create --fill', '/w/forkup')).toEqual(['acme/api'])
-  expect(await labels('gh issue create --title x', '/w/forkup')).toEqual(['acme/api'])
+  expect(await labels('gh issue create --title x', '/w/forkup')).toEqual([], 'filing a ticket is allowed')
   expect(await labels('gh pr merge 12 --squash', '/w/forkup')).toEqual(['acme/api'])
   const hit = await checkBash('gh pr comment 3 --body hi', deps('/w/forkup'))
   expect(hit.map(h => h.detail)).toEqual(['gh pr comment'])
-  expect(await labels('gh api -X POST repos/{owner}/{repo}/issues -f title=x', '/w/forkup')).toEqual(['acme/api'])
-  expect(await labels('gh api repos/{owner}/{repo}/issues -f title=x', '/w/forkup')).toEqual(['acme/api'])
+  expect(await labels('gh api -X POST repos/{owner}/{repo}/issues -f title=x', '/w/forkup')).toEqual([])
+  expect(await labels('gh api -X PATCH repos/{owner}/{repo}/issues/3 -f state=closed', '/w/forkup')).toEqual(['acme/api'])
   expect(await labels('gh api graphql -f query=\'mutation { addStar(input:{starrableId:"x"}) { clientMutationId } }\'', '/w/forkup')).toEqual(['acme/api'])
 })
 
@@ -1058,7 +1052,7 @@ test('a fork with no upstream remote: the parent that GitHub names decides', asy
     return parent
   }
   expect(await labels('gh pr create --fill', '/w/forknp', { parentOf: parentIs('acme/api') })).toEqual(['acme/api'])
-  expect(await labels('gh api -X POST repos/{owner}/{repo}/issues -f title=x', '/w/forknp', { parentOf: parentIs('ACME/API') })).toEqual(['acme/api'])
+  expect(await labels('gh api -X PATCH repos/{owner}/{repo}/issues/3 -f state=closed', '/w/forknp', { parentOf: parentIs('ACME/API') })).toEqual(['acme/api'])
   expect(asked).toEqual(['someone/fork', 'someone/fork'])
   expect(await labels('gh pr create --fill', '/w/forknp', { parentOf: parentIs('other/lib') })).toEqual([])
   expect(await labels('gh pr create --fill', '/w/forknp', { parentOf: parentIs(null) })).toEqual([])
@@ -1100,7 +1094,30 @@ test('GitHub is not asked for reads, git, named repos, non-GitHub origins, or wh
 
 test('gh api with {owner}/{repo}: gh fills it from -R / GH_REPO, so that repo decides', async () => {
   const protectedRepo = CFG.repos[0]!
-  expect(await labels(`gh api -R ${protectedRepo} repos/{owner}/{repo}/issues -f title=x`, '/w/mine')).toEqual([protectedRepo])
-  expect(await labels(`GH_REPO=${protectedRepo} gh api repos/{owner}/{repo}/issues -f title=x`, '/w/mine')).toEqual([protectedRepo])
-  expect(await labels('gh api -R someone/other repos/{owner}/{repo}/issues -f title=x', '/w/mine')).toEqual([])
+  expect(await labels(`gh api -R ${protectedRepo} -X PATCH repos/{owner}/{repo}/issues/3 -f state=closed`, '/w/mine')).toEqual([protectedRepo])
+  expect(await labels(`GH_REPO=${protectedRepo} gh api -X PATCH repos/{owner}/{repo}/issues/3 -f state=closed`, '/w/mine')).toEqual([protectedRepo])
+  expect(await labels('gh api -R someone/other -X PATCH repos/{owner}/{repo}/issues/3 -f state=closed', '/w/mine')).toEqual([])
+})
+
+
+test('tickets: filing an issue or commenting on one is allowed in a protected repo; changing issues is not', async () => {
+  for (const cmd of [
+    'gh issue create --title x',
+    'gh issue create -R acme/api --title x --body-file t.md',
+    'gh issue comment 4 -b hola',
+    'gh issue comment 1 -R acme/crm -b hola',
+    'gh api -X POST repos/acme/api/issues -f title=x',
+    'gh api repos/acme/api/issues -f title=x',
+    'gh api -X POST /repos/acme/server/issues/12/comments -f body=x',
+  ]) expect([cmd, await blocked(cmd)]).toEqual([cmd, false])
+  for (const cmd of [
+    'gh issue edit 4 --title y',
+    'gh issue close 4',
+    'gh issue delete 4 --yes',
+    'gh issue transfer 4 acme/other',
+    'gh api -X PATCH repos/acme/api/issues/4 -f state=closed',
+    'gh api -X DELETE repos/acme/api/issues/comments/9',
+    'gh api -X POST repos/acme/api/issues/4/labels -f labels[]=x',
+    'gh api -X POST repos/acme/api/pulls -f title=x',
+  ]) expect([cmd, await blocked(cmd)]).toEqual([cmd, true])
 })
